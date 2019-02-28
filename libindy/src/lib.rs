@@ -38,6 +38,7 @@ extern crate uuid;
 extern crate derivative;
 extern crate sodiumoxide;
 extern crate core;
+extern crate mongodb;
 
 extern crate hex;
 

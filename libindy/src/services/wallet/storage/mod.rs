@@ -1,5 +1,6 @@
 pub mod default;
 pub mod plugged;
+pub mod ccis;
 
 use errors::prelude::*;
 use services::wallet::language;

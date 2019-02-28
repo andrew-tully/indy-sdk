@@ -1,0 +1,40 @@
+[package]
+name = "bson"
+version = "0.13.0"
+authors = [
+    "Y. T. Chung <zonyitoo@gmail.com>",
+    "Kevin Yeh <kevinyeah@utexas.edu>"
+]
+description = "Encoding and decoding support for BSON in Rust"
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/zonyitoo/bson-rs"
+documentation = "https://docs.rs/crate/bson"
+
+[features]
+# no features by default
+default = []
+# attempt to encode unsigned types in signed types
+u2i = []
+
+[lib]
+name = "bson"
+
+[dependencies]
+byteorder = "1"
+chrono = "0.4"
+libc = "0.2"
+rand = "0.5"
+serde = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+time = "0.1"
+linked-hash-map = "0.5"
+hostname = "0.1"
+hex = "0.3"
+md5 = "0.3"
+try_from = "0.2"
+
+[dev-dependencies]
+assert_matches = "1.2"
+serde_derive = "1.0"
+serde_bytes = "0.10"
