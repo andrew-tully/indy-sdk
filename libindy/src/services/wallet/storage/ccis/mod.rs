@@ -407,10 +407,6 @@ impl MongoOp {
                 if w.write_exception.is_some() {
                     return Err(IndyError::from_msg(IndyErrorKind::IOError,"Unable to delete documents"));
                 }
-
-                if w.deleted_count == 0 {
-                    return Err(IndyError::from(IndyErrorKind::WalletItemNotFound));
-                }
             }
         }
 
