@@ -20,7 +20,8 @@ use utils::sequence;
 use self::export_import::{export_continue, finish_import, preparse_file_to_import};
 use self::storage::{WalletStorage, WalletStorageType};
 use self::storage::default::SQLiteStorageType;
-use self::storage::ccis::MongoStorageType;
+use self::storage::ccis_mongo::MongoStorageType;
+use self::storage::ccis_sws::SwsStorageType;
 use self::storage::plugged::PluggedStorageType;
 use self::wallet::{Keys, Wallet};
 use api::WalletHandle;
@@ -46,7 +47,8 @@ impl WalletService {
         let storage_types = {
             let mut map: HashMap<String, Box<WalletStorageType>> = HashMap::new();
             map.insert("default".to_string(), Box::new(SQLiteStorageType::new()));
-            map.insert("ccis".to_string(), Box::new(MongoStorageType::new()));
+            map.insert("ccis_mongo".to_string(), Box::new(MongoStorageType::new()));
+            map.insert("ccis_sws".to_string(), Box::new(SwsStorageType::new()));
             RefCell::new(map)
         };
 
