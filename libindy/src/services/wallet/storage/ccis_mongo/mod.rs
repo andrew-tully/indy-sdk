@@ -1059,7 +1059,7 @@ impl WalletStorageType for MongoStorageType {
     }
 
     fn open_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>) -> Result<Box<WalletStorage>, IndyError>{
-        print!("mongo open_storage");
+        print!("ccis_mongo open_storage");
 
         match MongoOp::wallet_exist_t(id) {
             Ok(exist) => {
@@ -1074,7 +1074,7 @@ impl WalletStorageType for MongoStorageType {
     }
 
     fn delete_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>) -> Result<(), IndyError>{
-        print!("mongo delete_storage");
+        print!("ccis_mongo delete_storage");
 
         match MongoOp::wallet_exist_t(id) {
             Ok(exist) => {

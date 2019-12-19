@@ -42,6 +42,10 @@ extern crate mongodb;
 
 extern crate hex;
 
+extern crate grpcio;
+extern crate protobuf;
+extern crate futures;
+
 // Note that to use macroses from util inside of other modules it must be loaded first!
 #[macro_use]
 mod utils;
