@@ -103,6 +103,7 @@ criterion = "=0.2.11"
 indy = { path = "../wrappers/rust", version = "=1.9.0" }
 indy-sys = { path = "../wrappers/rust/indy-sys", version = "=1.9.0" }
 futures = "=0.1.29"
+mockall = "0.6.0"
 
 [[bench]]
 name = "wallet"

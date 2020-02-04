@@ -4,33 +4,23 @@ use std::sync::Arc;
 use services::wallet::storage::{WalletStorage, StorageRecord, Tag, TagName, StorageIterator};
 use errors::IndyError;
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, Channel};
+
 use services::wallet::wallet::EncryptedValue;
 use services::wallet::{language, SearchOptions};
 
 use errors::prelude::*;
 
-mod secure_wallet_server;
-mod secure_wallet_server_grpc;
-use services::wallet::storage::ccis_sws::secure_wallet_server::*;
-use services::wallet::storage::ccis_sws::secure_wallet_server_grpc::SecureWalletClient;
+mod secure_wallet_service;
+mod secure_wallet_service_grpc;
+use services::wallet::storage::ccis_sws::secure_wallet_service::*;
+use services::wallet::storage::ccis_sws::secure_wallet_service_grpc::SecureWalletClient;
 
 lazy_static! {
     static ref SWS_CLIENT: SecureWalletClient = {
-        SwsGrpcClient::new().client
-    };
-}
-
-struct SwsGrpcClient {
-    client : SecureWalletClient
-}
-
-impl SwsGrpcClient {
-    pub fn new() -> SwsGrpcClient {
         let env: Arc<Environment> = Arc::new(EnvBuilder::new().build());
         let ch: Channel = ChannelBuilder::new(env).connect("localhost:50051");
-        let sws_client: SecureWalletClient = secure_wallet_server_grpc::SecureWalletClient::new(ch);
-        SwsGrpcClient{ client: sws_client }
-    }
+        secure_wallet_service_grpc::SecureWalletClient::new(ch)
+    };
 }
 
 struct SwsStorage {
@@ -47,13 +37,12 @@ impl WalletStorage for SwsStorage {
     #[allow(non_snake_case)]
     fn get(&self, type_: &[u8], id: &[u8], options: &str) -> Result<StorageRecord, IndyError> {
         // [Done] Initialize the GetWalletItemRequest
-        let mut req: GetWalletItemRequest = secure_wallet_server::GetWalletItemRequest::new();
+        let mut req: GetWalletItemRequest = secure_wallet_service::GetWalletItemRequest::new();
 
-        // [Done] Set request params 1. walletId 2. field_type 3. id 4. sk2
+        // [Done] Set request params 1. walletId 2. field_type 3. id
         req.set_walletId(self.wallet_id.clone());
         req.set_field_type(type_.to_vec());
         req.set_id(id.to_vec());
-        // TODO: set SK2 in the GetWalletItemRequest
 
         // [Done] match call of SWS client of get_wallet_item, error handling, response. 1. walletItem
         let wallet_item: WalletItemResponse = match SWS_CLIENT.get_wallet_item(&req) {
@@ -102,11 +91,11 @@ impl WalletStorage for SwsStorage {
 
     fn add(&self, type_: &[u8], id: &[u8], value: &EncryptedValue, tags: &[Tag]) -> Result<(), IndyError> {
         // [Done] Initialize the AddWalletItemRequest
-        let mut req: AddWalletItemRequest = secure_wallet_server::AddWalletItemRequest::new();
+        let mut req: AddWalletItemRequest = secure_wallet_service::AddWalletItemRequest::new();
 
         // [Done] Set the request params 1. walletId: String 2. field_type: vu8 3. id: vu8 4. value: vu8
             // 5. key: vu8 6. encryptedTags: <name: vu8, encryptedValue: vu8>
-            // 7. plaintextTags <name: vu8, plaintextValue: String> 8. sk2: vu8
+            // 7. plaintextTags <name: vu8, plaintextValue: String>
         req.set_walletId(self.wallet_id.clone());
         req.set_field_type(type_.to_vec());
         req.set_id(id.to_vec());
@@ -120,14 +109,14 @@ impl WalletStorage for SwsStorage {
             for tag in tags {
                 match tag {
                     &Tag::Encrypted(ref tag_name, ref tag_data) => {
-                        let mut encrypted_tag: EncryptedTagResponse = secure_wallet_server::EncryptedTagResponse::new();
+                        let mut encrypted_tag: EncryptedTagResponse = secure_wallet_service::EncryptedTagResponse::new();
                         encrypted_tag.set_name(tag_name.to_vec());
                         encrypted_tag.set_encryptedValue(tag_data.to_vec());
                         encrypted_tags.push(encrypted_tag.clone());
                     },
 
                     &Tag::PlainText(ref tag_name, ref tag_data) => {
-                        let mut plaintext_tag: PlaintextTagResponse = secure_wallet_server::PlaintextTagResponse::new();
+                        let mut plaintext_tag: PlaintextTagResponse = secure_wallet_service::PlaintextTagResponse::new();
                         plaintext_tag.set_name(tag_name.to_vec());
                         plaintext_tag.set_plaintextValue(tag_data.to_string());
                         plaintext_tags.push(plaintext_tag.clone());
@@ -137,8 +126,6 @@ impl WalletStorage for SwsStorage {
         }
         req.set_encryptedTags(::protobuf::RepeatedField::from_vec(encrypted_tags));
         req.set_plaintextTags(::protobuf::RepeatedField::from_vec(plaintext_tags));
-
-        // TODO: set sk2 in the AddWalletItemRequest
 
         // [Done] Match call of SWS client of add_wallet_item, error handling, response -> message: String
         match SWS_CLIENT.add_wallet_item(&req) {
@@ -153,16 +140,15 @@ impl WalletStorage for SwsStorage {
 
     fn update(&self, type_: &[u8], id: &[u8], value: &EncryptedValue) -> Result<(), IndyError> {
         // Initialize the UpdateWalletItemRequest
-        let mut req: UpdateWalletItemRequest = secure_wallet_server::UpdateWalletItemRequest::new();
+        let mut req: UpdateWalletItemRequest = secure_wallet_service::UpdateWalletItemRequest::new();
 
         // Set request params 1. walletId: String 2. field_type: vu8 3. id: vu8 4. value: vu8
-            // 5. key: vu8 6. sk2: vu8
+            // 5. key: vu8
         req.set_walletId(self.wallet_id.clone());
         req.set_field_type(type_.to_vec());
         req.set_id(id.to_vec());
         req.set_value(value.data.to_vec());
         req.set_key(value.key.to_vec());
-        // TODO: set sk2 in the UpdateWalletItemRequest
 
         // Match call of SWS client of update_wallet_item, error handling, response. 1. message: String
         match SWS_CLIENT.update_wallet_item(&req) {
@@ -177,7 +163,7 @@ impl WalletStorage for SwsStorage {
 
     fn add_tags(&self, type_: &[u8], id: &[u8], tags: &[Tag]) -> Result<(), IndyError> {
         // Initialize the AddWalletItemTagsRequest
-        let mut req: AddWalletItemTagsRequest = secure_wallet_server::AddWalletItemTagsRequest::new();
+        let mut req: AddWalletItemTagsRequest = secure_wallet_service::AddWalletItemTagsRequest::new();
 
         // Set request params 1. walletId: String 2. field_type: vu8 3. id: vu8
             // 4. encryptedTags: <name: vu8, encryptedValue: vu8>
@@ -193,14 +179,14 @@ impl WalletStorage for SwsStorage {
             for tag in tags {
                 match tag {
                     &Tag::Encrypted(ref tag_name, ref tag_data) => {
-                        let mut encrypted_tag: EncryptedTagResponse = secure_wallet_server::EncryptedTagResponse::new();
+                        let mut encrypted_tag: EncryptedTagResponse = secure_wallet_service::EncryptedTagResponse::new();
                         encrypted_tag.set_name(tag_name.to_vec());
                         encrypted_tag.set_encryptedValue(tag_data.to_vec());
                         encrypted_tags.push(encrypted_tag.clone());
                     },
 
                     &Tag::PlainText(ref tag_name, ref tag_data) => {
-                        let mut plaintext_tag: PlaintextTagResponse = secure_wallet_server::PlaintextTagResponse::new();
+                        let mut plaintext_tag: PlaintextTagResponse = secure_wallet_service::PlaintextTagResponse::new();
                         plaintext_tag.set_name(tag_name.to_vec());
                         plaintext_tag.set_plaintextValue(tag_data.to_string());
                         plaintext_tags.push(plaintext_tag.clone());
@@ -225,7 +211,7 @@ impl WalletStorage for SwsStorage {
 
     fn update_tags(&self, type_: &[u8], id: &[u8], tags: &[Tag]) -> Result<(), IndyError> {
         // Initialize the UpdateWalletItemTagsRequest
-        let mut req: UpdateWalletItemTagsRequest = secure_wallet_server::UpdateWalletItemTagsRequest::new();
+        let mut req: UpdateWalletItemTagsRequest = secure_wallet_service::UpdateWalletItemTagsRequest::new();
 
         // Set request params 1. walletId: String 2. field_type: vu8 3. id: vu8
             // 4. encryptedTags: <name: vu8, encryptedValue: vu8>
@@ -241,14 +227,14 @@ impl WalletStorage for SwsStorage {
             for tag in tags {
                 match tag {
                     &Tag::Encrypted(ref tag_name, ref tag_data) => {
-                        let mut encrypted_tag: EncryptedTagResponse = secure_wallet_server::EncryptedTagResponse::new();
+                        let mut encrypted_tag: EncryptedTagResponse = secure_wallet_service::EncryptedTagResponse::new();
                         encrypted_tag.set_name(tag_name.to_vec());
                         encrypted_tag.set_encryptedValue(tag_data.to_vec());
                         encrypted_tags.push(encrypted_tag.clone());
                     },
 
                     &Tag::PlainText(ref tag_name, ref tag_data) => {
-                        let mut plaintext_tag: PlaintextTagResponse = secure_wallet_server::PlaintextTagResponse::new();
+                        let mut plaintext_tag: PlaintextTagResponse = secure_wallet_service::PlaintextTagResponse::new();
                         plaintext_tag.set_name(tag_name.to_vec());
                         plaintext_tag.set_plaintextValue(tag_data.to_string());
                         plaintext_tags.push(plaintext_tag.clone());
@@ -272,7 +258,7 @@ impl WalletStorage for SwsStorage {
     }
     fn delete_tags(&self, type_: &[u8], id: &[u8], tag_names: &[TagName]) -> Result<(), IndyError> {
         // Initialize the DeleteWalletItemTagsRequest
-        let mut req: DeleteWalletItemTagsRequest = secure_wallet_server::DeleteWalletItemTagsRequest::new();
+        let mut req: DeleteWalletItemTagsRequest = secure_wallet_service::DeleteWalletItemTagsRequest::new();
 
         // Set request params 1. walletId: String 2. field_type: vu8 3. id: vu8
             // 4. tagNames: DeleteWalletItemTagsRequest_TagName
@@ -285,14 +271,14 @@ impl WalletStorage for SwsStorage {
         for tag_name in tag_names {
             match tag_name {
                 &TagName::OfEncrypted(ref tag_name) => {
-                    let mut encrypted_tag_name: DeleteWalletItemTagsRequest_TagName = secure_wallet_server::DeleteWalletItemTagsRequest_TagName::new();
-                    encrypted_tag_name.set_tagType(secure_wallet_server::DeleteWalletItemTagsRequest_TagType::ENCRYPTED);
+                    let mut encrypted_tag_name: DeleteWalletItemTagsRequest_TagName = secure_wallet_service::DeleteWalletItemTagsRequest_TagName::new();
+                    encrypted_tag_name.set_tagType(secure_wallet_service::DeleteWalletItemTagsRequest_TagType::ENCRYPTED);
                     encrypted_tag_name.set_name(tag_name.to_vec());
                     tag_names_list.push(encrypted_tag_name.clone());
                 },
                 &TagName::OfPlain(ref tag_name) => {
-                    let mut plaintext_tag_name: DeleteWalletItemTagsRequest_TagName = secure_wallet_server::DeleteWalletItemTagsRequest_TagName::new();
-                    plaintext_tag_name.set_tagType(secure_wallet_server::DeleteWalletItemTagsRequest_TagType::PLAINTEXT);
+                    let mut plaintext_tag_name: DeleteWalletItemTagsRequest_TagName = secure_wallet_service::DeleteWalletItemTagsRequest_TagName::new();
+                    plaintext_tag_name.set_tagType(secure_wallet_service::DeleteWalletItemTagsRequest_TagType::PLAINTEXT);
                     plaintext_tag_name.set_name(tag_name.to_vec());
                     tag_names_list.push(plaintext_tag_name.clone());
                 }
@@ -313,24 +299,28 @@ impl WalletStorage for SwsStorage {
 
     fn delete(&self, type_: &[u8], id: &[u8]) -> Result<(), IndyError> {
         // Initialize the DeleteWalletRequest
-        let mut req: DeleteWalletRequest = secure_wallet_server::DeleteWalletRequest::new();
+        let mut req: DeleteWalletItemRequest = secure_wallet_service::DeleteWalletItemRequest::new();
 
-        // Set request params 1. walletId: String
+        // Set request params 1. walletId: String 2. field_type: vu8 3. id: vu8
         req.set_walletId(self.wallet_id.clone());
+        req.set_field_type(type_.to_vec());
+        req.set_id(id.to_vec());
 
         // Match call of SWS client of delete_wallet, error handling, response 1. message: String
-        match SWS_CLIENT.delete_wallet(&req) {
+        match SWS_CLIENT.delete_wallet_item(&req) {
             Err(_e) => {
-                return Err(IndyError::from(IndyErrorKind::WalletNotFound));
+                return Err(IndyError::from(IndyErrorKind::WalletItemNotFound));
             },
             Ok(e) => { e.message }
         };
+
+        // TODO: Missing delete the encrypted and plaintext tags related to credential
 
         Ok(())
     }
     fn get_storage_metadata(&self) -> Result<Vec<u8>, IndyError> {
         // Initialize the GetWalletMetadataRequest
-        let mut req: GetWalletMetadataRequest = secure_wallet_server::GetWalletMetadataRequest::new();
+        let mut req: GetWalletMetadataRequest = secure_wallet_service::GetWalletMetadataRequest::new();
 
         // Set request params 1. walletId: String
         req.set_walletId(self.wallet_id.clone());
@@ -347,7 +337,7 @@ impl WalletStorage for SwsStorage {
     }
     fn set_storage_metadata(&self, metadata: &[u8]) -> Result<(), IndyError> {
         // Initialize the SetWalletMetadataRequest
-        let mut req: SetWalletMetadataRequest = secure_wallet_server::SetWalletMetadataRequest::new();
+        let mut req: SetWalletMetadataRequest = secure_wallet_service::SetWalletMetadataRequest::new();
 
         // Set request params 1. walletId: String 2. metadata: vu8
         req.set_walletId(self.wallet_id.clone());
@@ -365,11 +355,10 @@ impl WalletStorage for SwsStorage {
     }
     fn get_all(&self) -> Result<Box<StorageIterator>, IndyError> {
         // Initialize the GetAllWalletItemsRequest
-        let mut req: GetAllWalletItemsRequest = secure_wallet_server::GetAllWalletItemsRequest::new();
+        let mut req: GetAllWalletItemsRequest = secure_wallet_service::GetAllWalletItemsRequest::new();
 
-        // Set request params 1. walletId: String 2. sk2: vu8
+        // Set request params 1. walletId: String
         req.set_walletId(self.wallet_id.clone());
-        // TODO: set sk2 in the GetAllWalletItemsRequest
 
         // Match call of SWS client of get_all_wallet_items, error handling, response 1. walletItems: Repeated<WalletItemResponse>
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.get_all_wallet_items(&req) {
@@ -385,9 +374,9 @@ impl WalletStorage for SwsStorage {
     }
     fn search(&self, type_: &[u8], query: &language::Operator, options: Option<&str>) -> Result<Box<StorageIterator>, IndyError> {
         // Initialize the SearchWalletItemsRequest
-        let mut req: SearchWalletItemsRequest = secure_wallet_server::SearchWalletItemsRequest::new();
+        let mut req: SearchWalletItemsRequest = secure_wallet_service::SearchWalletItemsRequest::new();
 
-        // Set request params 1. walletId: String 2. field_type: vu8 3. query: String 4. options: String 5. sk2: vu8
+        // Set request params 1. walletId: String 2. field_type: vu8 3. query: String 4. options: String
         req.set_walletId(self.wallet_id.clone());
         req.set_field_type(type_.to_vec());
         // TODO: not sure if this is right
@@ -399,8 +388,6 @@ impl WalletStorage for SwsStorage {
             Some(option_str) => serde_json::from_str(option_str)
                 .to_indy(IndyErrorKind::InvalidStructure, "Search options is malformed json")?
         };
-
-        // TODO: set sk2 in the SearchWalletItemsRequest
 
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.search_wallet_items(&req) {
             Err(_e) => {
@@ -429,7 +416,7 @@ impl SwsStorageType {
 impl WalletStorageType for SwsStorageType {
     fn create_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>, metadata: &[u8]) -> Result<(), IndyError>{
         // Set CreateWalletRequest for the gRPC call to CCIS SWS
-        let mut req: CreateWalletRequest = secure_wallet_server::CreateWalletRequest::new();
+        let mut req: CreateWalletRequest = secure_wallet_service::CreateWalletRequest::new();
         req.set_walletId(id.to_string());
         req.set_metadata(metadata.to_vec());
 
@@ -441,7 +428,6 @@ impl WalletStorageType for SwsStorageType {
             },
             Ok(e) => { e }
         };
-        // TODO: Discuss about handling SK1, SK2, SK3. Current return type is None.
         Ok(())
     }
 
@@ -453,7 +439,7 @@ impl WalletStorageType for SwsStorageType {
 
     fn delete_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>) -> Result<(), IndyError> {
         // Set DeleteWalletRequest for the gRPC call to CCIS SWS
-        let mut req: DeleteWalletRequest = secure_wallet_server::DeleteWalletRequest::new();
+        let mut req: DeleteWalletRequest = secure_wallet_service::DeleteWalletRequest::new();
         req.set_walletId(id.to_string());
 
         // Call the DeleteWallet function with the request
@@ -546,7 +532,9 @@ mod ccis_sws_tests {
     use super::*;
     use super::super::Tag;
 
+
     #[test]
+    // TODO: These tests below to be deleted/moved as these are integration tests. Don't belong.
     fn ccis_sws_storage_type_create_and_delete_works() {
         let storage_type = SwsStorageType::new();
         match storage_type.delete_storage(_wallet_id(), None, None) {
@@ -569,6 +557,7 @@ mod ccis_sws_tests {
     }
 
     #[test]
+    // TODO: These tests below to be deleted/moved as these are integration tests. Don't belong.
     fn ccis_sws_storage_type_open_works() {
         let storage_type = SwsStorageType::new();
         storage_type.open_storage(_wallet_id(), None, None).unwrap();
