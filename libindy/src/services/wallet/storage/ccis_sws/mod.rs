@@ -6,7 +6,7 @@ use errors::IndyError;
 use grpcio::{ChannelBuilder, EnvBuilder, Environment, Channel};
 
 use services::wallet::wallet::EncryptedValue;
-use services::wallet::{language, SearchOptions};
+use services::wallet::{language, SearchOptions, RecordOptions};
 
 use errors::prelude::*;
 
@@ -44,6 +44,13 @@ impl WalletStorage for SwsStorage {
         req.set_field_type(type_.to_vec());
         req.set_id(id.to_vec());
 
+        let options: RecordOptions = if options == "{}" { // FIXME:
+            RecordOptions::default()
+        } else {
+            serde_json::from_str(options)
+                .to_indy(IndyErrorKind::InvalidStructure, "RecordOptions is malformed json")?
+        };
+
         // [Done] match call of SWS client of get_wallet_item, error handling, response. 1. walletItem
         let wallet_item: WalletItemResponse = match SWS_CLIENT.get_wallet_item(&req) {
             Err(_e) => {
@@ -54,39 +61,52 @@ impl WalletStorage for SwsStorage {
 
         // [Done] Extract the walletItem's params. Plain text [[ 1. id 2. value 3. key 4. field_type ]] 5. encryptedTags 6. plaintextTags
         let id: &[u8] = wallet_item.get_id();
-        let value: EncryptedValue = EncryptedValue::new(wallet_item.get_value().to_vec(), wallet_item.get_key().to_vec());
-        let type_: &[u8] = wallet_item.get_field_type();
+        let value = if options.retrieve_value {
+            Some(EncryptedValue::new(wallet_item.get_value().to_vec(), wallet_item.get_key().to_vec()))
+        } else {
+            None
+        };
+        let type_ = if options.retrieve_type {
+            Some(wallet_item.get_field_type())
+        } else {
+            None
+        };
 
-        let mut tags: Vec<Tag> = vec![];
+        let all_tags = if options.retrieve_tags {
+            let mut tags: Vec<Tag> = vec![];
 
-        let encrypted_tags = wallet_item.get_encryptedTags();
-        if !encrypted_tags.is_empty() {
-            for encrypted_tag in encrypted_tags {
-                match encrypted_tag {
-                    EncryptedTagResponse{name, encryptedValue, unknown_fields: _, cached_size: _ } => {
-                        let tag: Tag = Tag::Encrypted(name.to_vec(), encryptedValue.to_vec());
-                        tags.push(tag);
-                    }
-                };
+            let encrypted_tags = wallet_item.get_encryptedTags();
+            if !encrypted_tags.is_empty() {
+                for encrypted_tag in encrypted_tags {
+                    match encrypted_tag {
+                        EncryptedTagResponse{name, encryptedValue, unknown_fields: _, cached_size: _ } => {
+                            let tag: Tag = Tag::Encrypted(name.to_vec(), encryptedValue.to_vec());
+                            tags.push(tag);
+                        }
+                    };
+                }
             }
-        }
 
-        let plaintext_tags = wallet_item.get_plaintextTags();
-        if !plaintext_tags.is_empty() {
-            for plaintext_tag in plaintext_tags {
-                match plaintext_tag {
-                    PlaintextTagResponse{name, plaintextValue, unknown_fields: _, cached_size: _ } => {
-                        let tag: Tag = Tag::PlainText(name.to_vec(), plaintextValue.to_string());
-                        tags.push(tag);
-                    }
-                };
+            let plaintext_tags = wallet_item.get_plaintextTags();
+            if !plaintext_tags.is_empty() {
+                for plaintext_tag in plaintext_tags {
+                    match plaintext_tag {
+                        PlaintextTagResponse{name, plaintextValue, unknown_fields: _, cached_size: _ } => {
+                            let tag: Tag = Tag::PlainText(name.to_vec(), plaintextValue.to_string());
+                            tags.push(tag);
+                        }
+                    };
+                }
             }
-        }
+            Some(tags)
+        } else {
+            None
+        };
 
         // [Done] Fill an initialized Storage Record params. 1. id: Vu8
         // 2. value: Option<EncryptedValue> a) data: Vu8 b) key: Vu8 3. type_: Option<Vu8>
         // 4. tags: V<Tag> i) Encrypted(vu8,vu8) or ii) PlainText(vu8, String)
-        Ok(StorageRecord::new(id.to_vec(), Some(value), Some(type_.to_vec()), Some(tags)))
+        Ok(StorageRecord::new(id.to_vec(), value, type_.map(|val| val.to_vec()), all_tags))
     }
 
     fn add(&self, type_: &[u8], id: &[u8], value: &EncryptedValue, tags: &[Tag]) -> Result<(), IndyError> {
@@ -360,6 +380,13 @@ impl WalletStorage for SwsStorage {
         // Set request params 1. walletId: String
         req.set_walletId(self.wallet_id.clone());
 
+        let fetch_options = RecordOptions {
+            retrieve_type: true,
+            retrieve_value: true,
+            retrieve_tags: true,
+        };
+
+
         // Match call of SWS client of get_all_wallet_items, error handling, response 1. walletItems: Repeated<WalletItemResponse>
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.get_all_wallet_items(&req) {
             Err(_e) => {
@@ -370,7 +397,7 @@ impl WalletStorage for SwsStorage {
 
         // Figure out what to do with wallet items and Storage Iterator
 
-        Ok(Box::new(SwsStorageIterator::new(wallet_items_list.to_vec(), wallet_items_list.len())))
+        Ok(Box::new(SwsStorageIterator::new(wallet_items_list.to_vec(), wallet_items_list.len(), fetch_options)))
     }
     fn search(&self, type_: &[u8], query: &language::Operator, options: Option<&str>) -> Result<Box<StorageIterator>, IndyError> {
         // Initialize the SearchWalletItemsRequest
@@ -379,14 +406,22 @@ impl WalletStorage for SwsStorage {
         // Set request params 1. walletId: String 2. field_type: vu8 3. query: String 4. options: String
         req.set_walletId(self.wallet_id.clone());
         req.set_field_type(type_.to_vec());
-        // TODO: not sure if this is right
         req.set_query(query.to_string());
 
-        // TODO: not sure if this is what we want
         let search_options: SearchOptions = match options {
             None => SearchOptions::default(),
             Some(option_str) => serde_json::from_str(option_str)
                 .to_indy(IndyErrorKind::InvalidStructure, "Search options is malformed json")?
+        };
+
+        let fetch_options = if search_options.retrieve_records {
+            RecordOptions {
+                retrieve_value: search_options.retrieve_value,
+                retrieve_tags: search_options.retrieve_tags,
+                retrieve_type: search_options.retrieve_type,
+            }
+        } else {
+            RecordOptions::default()
         };
 
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.search_wallet_items(&req) {
@@ -396,7 +431,7 @@ impl WalletStorage for SwsStorage {
             Ok(e) => { e.walletItems.into_vec() }
         };
 
-        Ok(Box::new(SwsStorageIterator::new(wallet_items_list.to_vec(), wallet_items_list.len())))
+        Ok(Box::new(SwsStorageIterator::new(wallet_items_list.to_vec(), wallet_items_list.len(), fetch_options)))
     }
     fn close(&mut self) -> Result<(), IndyError> {
         // No call made to SWS
@@ -456,14 +491,16 @@ impl WalletStorageType for SwsStorageType {
 
 struct SwsStorageIterator {
     credentials: Vec<WalletItemResponse>,
+    options: RecordOptions,
     cursor_index: usize,
     total_count: usize,
 }
 
 impl SwsStorageIterator {
-    pub fn new(credentials: Vec<WalletItemResponse>, total_count: usize) -> SwsStorageIterator {
+    pub fn new(credentials: Vec<WalletItemResponse>, total_count: usize, options: RecordOptions) -> SwsStorageIterator {
         SwsStorageIterator {
             credentials,
+            options,
             cursor_index: 0,
             total_count
         }
@@ -483,34 +520,49 @@ impl StorageIterator for SwsStorageIterator {
         // Convert WalletItemResponse into StorageRecord
         // [Done] Extract the walletItem's params. Plain text [[ 1. id 2. value 3. key 4. field_type ]] 5. encryptedTags 6. plaintextTags
         let id: &[u8] = wallet_item.get_id();
-        let value: EncryptedValue = EncryptedValue::new(wallet_item.get_value().to_vec(), wallet_item.get_key().to_vec());
-        let type_: &[u8] = wallet_item.get_field_type();
 
-        let mut tags: Vec<Tag> = vec![];
+        let value = if self.options.retrieve_value {
+            Some(EncryptedValue::new(wallet_item.get_value().to_vec(), wallet_item.get_key().to_vec()))
+        } else {
+            None
+        };
 
-        let encrypted_tags = wallet_item.get_encryptedTags();
-        if !encrypted_tags.is_empty() {
-            for encrypted_tag in encrypted_tags {
-                match encrypted_tag {
-                    EncryptedTagResponse{name, encryptedValue, unknown_fields: _, cached_size: _ } => {
-                        let tag: Tag = Tag::Encrypted(name.to_vec(), encryptedValue.to_vec());
-                        tags.push(tag);
-                    }
-                };
+        let type_ = if self.options.retrieve_type {
+            Some(wallet_item.get_field_type())
+        } else {
+            None
+        };
+
+        let all_tags = if self.options.retrieve_tags {
+            let mut tags: Vec<Tag> = vec![];
+
+            let encrypted_tags = wallet_item.get_encryptedTags();
+            if !encrypted_tags.is_empty() {
+                for encrypted_tag in encrypted_tags {
+                    match encrypted_tag {
+                        EncryptedTagResponse{name, encryptedValue, unknown_fields: _, cached_size: _ } => {
+                            let tag: Tag = Tag::Encrypted(name.to_vec(), encryptedValue.to_vec());
+                            tags.push(tag);
+                        }
+                    };
+                }
             }
-        }
 
-        let plaintext_tags = wallet_item.get_plaintextTags();
-        if !plaintext_tags.is_empty() {
-            for plaintext_tag in plaintext_tags {
-                match plaintext_tag {
-                    PlaintextTagResponse{name, plaintextValue, unknown_fields: _, cached_size: _ } => {
-                        let tag: Tag = Tag::PlainText(name.to_vec(), plaintextValue.to_string());
-                        tags.push(tag);
-                    }
-                };
+            let plaintext_tags = wallet_item.get_plaintextTags();
+            if !plaintext_tags.is_empty() {
+                for plaintext_tag in plaintext_tags {
+                    match plaintext_tag {
+                        PlaintextTagResponse{name, plaintextValue, unknown_fields: _, cached_size: _ } => {
+                            let tag: Tag = Tag::PlainText(name.to_vec(), plaintextValue.to_string());
+                            tags.push(tag);
+                        }
+                    };
+                }
             }
-        }
+            Some(tags)
+        } else {
+            None
+        };
 
         // Increment the cursor_index
         self.cursor_index = self.cursor_index + 1;
@@ -518,7 +570,7 @@ impl StorageIterator for SwsStorageIterator {
         // [Done] Fill an initialized Storage Record params. 1. id: Vu8
         // 2. value: Option<EncryptedValue> a) data: Vu8 b) key: Vu8 3. type_: Option<Vu8>
         // 4. tags: V<Tag> i) Encrypted(vu8,vu8) or ii) PlainText(vu8, String)
-        Ok(Some(StorageRecord::new(id.to_vec(), Some(value), Some(type_.to_vec()), Some(tags))))
+        Ok(Some(StorageRecord::new(id.to_vec(), value, type_.map(|val| val.to_vec()), all_tags)))
     }
     fn get_total_count(&self) -> Result<Option<usize>, IndyError> {
         Ok(Some(self.total_count))
