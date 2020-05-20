@@ -46,6 +46,10 @@ extern crate grpcio;
 extern crate protobuf;
 extern crate futures;
 
+#[macro_use]
+extern crate enum_primitive_derive;
+extern crate num_traits;
+
 // Note that to use macroses from util inside of other modules it must be loaded first!
 #[macro_use]
 mod utils;

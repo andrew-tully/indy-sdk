@@ -87,6 +87,8 @@ curve25519-dalek = "=1.2.2"
 grpcio = "=0.4.7"
 protobuf = "=2.8.1"
 futures = "=0.1.29"
+enum-primitive-derive = "^0.1"
+num-traits = "^0.1"
 
 [dependencies.uuid]
 version = "=0.7.4"

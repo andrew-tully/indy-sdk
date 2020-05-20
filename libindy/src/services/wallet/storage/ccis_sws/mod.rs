@@ -1,21 +1,21 @@
 use super::{WalletStorageType};
 
+use api::ErrorCode;
+use std::error::Error;
 use std::sync::Arc;
-use services::wallet::storage::{WalletStorage, StorageRecord, Tag, TagName, StorageIterator};
-use errors::IndyError;
-use grpcio::{ChannelBuilder, EnvBuilder, Environment, Channel};
-use grpcio::Error::*;
-
 use services::wallet::wallet::EncryptedValue;
 use services::wallet::{language, SearchOptions, RecordOptions};
-
+use services::wallet::storage::{WalletStorage, StorageRecord, Tag, TagName, StorageIterator};
+use services::wallet::storage::ccis_sws::secure_wallet_service::*;
+use services::wallet::storage::ccis_sws::secure_wallet_service_grpc::SecureWalletClient;
+use errors::IndyError;
 use errors::prelude::*;
+use grpcio::{ChannelBuilder, EnvBuilder, Environment, Channel};
+use grpcio::Error::*;
+use num_traits::FromPrimitive;
 
 mod secure_wallet_service;
 mod secure_wallet_service_grpc;
-use services::wallet::storage::ccis_sws::secure_wallet_service::*;
-use services::wallet::storage::ccis_sws::secure_wallet_service_grpc::SecureWalletClient;
-use std::error::Error;
 
 lazy_static! {
     static ref SWS_CLIENT: SecureWalletClient = {
@@ -35,18 +35,47 @@ impl SwsStorage {
     }
 }
 
-fn grpc_error_to_indy_error(e: grpcio::Error, default: IndyErrorKind) -> IndyError {
+fn grpc_error_to_indy_error(e: grpcio::Error) -> IndyError {
     return match e {
         RpcFailure(failure) => {
+            let details = failure.details.unwrap_or("".to_string());
             match failure.status {
-                grpcio::RpcStatusCode::Unknown => {
-                    IndyError::from(default)
+                grpcio::RpcStatusCode::Internal => {
+                    let mut message = details.clone();
+                    let mut error_kind = IndyErrorKind::IOError;
+                    match serde_json::from_str::<serde_json::Value>(&details) {
+                        Ok(json) => {
+                            message = match json.get("message") {
+                                Some(m) => {
+                                    match m.as_str() {
+                                        Some(s) => s.to_string(),
+                                        None => message
+                                    }
+                                },
+                                None => message
+                            };
+                            error_kind = match json.get("code") {
+                                Some(c) => {
+                                    match c.as_u64() {
+                                        Some(u) => {
+                                            match ErrorCode::from_u64(u) {
+                                                Some(err_code) => IndyErrorKind::from(err_code),
+                                                None => error_kind
+                                            }
+                                        },
+                                        None => error_kind
+                                    }
+                                },
+                                None => error_kind
+                            }
+                        },
+                        _ => {}
+                    }
+                    IndyError::from_msg(error_kind, message)
                 },
-                _ => {
-                    IndyError::from_msg(IndyErrorKind::IOError, failure.details.unwrap())
-                }
+                _ => IndyError::from_msg(IndyErrorKind::IOError, details)
             }
-        }
+        },
         _ => IndyError::from_msg(IndyErrorKind::IOError, format!("Unexpected error: {:?}", e.description()))
     }
 }
@@ -72,7 +101,7 @@ impl WalletStorage for SwsStorage {
         // [Done] match call of SWS client of get_wallet_item, error handling, response. 1. walletItem
         let wallet_item: WalletItemResponse = match SWS_CLIENT.get_wallet_item(&req) {
             Err(e) => {
-              return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemNotFound))
+              return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.walletItem.unwrap() }
         };
@@ -168,7 +197,7 @@ impl WalletStorage for SwsStorage {
         // [Done] Match call of SWS client of add_wallet_item, error handling, response -> message: String
         match SWS_CLIENT.add_wallet_item(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemAlreadyExists))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -191,7 +220,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of update_wallet_item, error handling, response. 1. message: String
         match SWS_CLIENT.update_wallet_item(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -239,7 +268,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of add_wallet_item_tags, error handling, response 1. message: String
         match SWS_CLIENT.add_wallet_item_tags(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -287,7 +316,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of update_wallet_item_tags, error handling, response 1. message: String
         match SWS_CLIENT.update_wallet_item_tags(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -327,7 +356,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of delete_wallet_item_tags, error handling, response 1. message: String
         match SWS_CLIENT.delete_wallet_item_tags(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -347,7 +376,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of delete_wallet, error handling, response 1. message: String
         match SWS_CLIENT.delete_wallet_item(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletItemNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -366,7 +395,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of get_wallet_metadata, error handling, response 1. metadata: vu8
         let metadata: Vec<u8> = match SWS_CLIENT.get_wallet_metadata(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.metadata }
         };
@@ -384,7 +413,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of set_wallet_metadata, error handling, response 1. message: String
         match SWS_CLIENT.set_wallet_metadata(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.message }
         };
@@ -408,7 +437,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of get_all_wallet_items, error handling, response 1. walletItems: Repeated<WalletItemResponse>
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.get_all_wallet_items(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.walletItems.into_vec() }
         };
@@ -444,7 +473,7 @@ impl WalletStorage for SwsStorage {
 
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.search_wallet_items(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e.walletItems.into_vec() }
         };
@@ -476,7 +505,7 @@ impl WalletStorageType for SwsStorageType {
         // Call the CreateWallet function with the request
         match SWS_CLIENT.create_wallet(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletAlreadyExists))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e }
         };
@@ -498,7 +527,7 @@ impl WalletStorageType for SwsStorageType {
         // Call the DeleteWallet function with the request
         match SWS_CLIENT.delete_wallet(&req) {
             Err(e) => {
-                return Err(grpc_error_to_indy_error(e, IndyErrorKind::WalletNotFound))
+                return Err(grpc_error_to_indy_error(e))
             },
             Ok(e) => { e }
         };
