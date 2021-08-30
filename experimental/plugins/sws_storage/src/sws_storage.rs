@@ -470,7 +470,7 @@ impl WalletStorage for SwsStorage {
 
         Ok(())
     }
-    fn get_all(&self) -> Result<Box<StorageIterator>, WalletStorageError> {
+    fn get_all(&self) -> Result<Box<dyn StorageIterator>, WalletStorageError> {
         // Initialize the GetAllWalletItemsRequest
         let mut req: GetAllWalletItemsRequest = GetAllWalletItemsRequest::new();
 
@@ -496,7 +496,7 @@ impl WalletStorage for SwsStorage {
 
         Ok(Box::new(SwsStorageIterator::new(wallet_items_list.to_vec(), wallet_items_list.len(), fetch_options)))
     }
-    fn search(&self, type_: &[u8], query: &language::Operator, options: Option<&str>) -> Result<Box<StorageIterator>, WalletStorageError> {
+    fn search(&self, type_: &[u8], query: &language::Operator, options: Option<&str>) -> Result<Box<dyn StorageIterator>, WalletStorageError> {
         // Initialize the SearchWalletItemsRequest
         let mut req: SearchWalletItemsRequest = SearchWalletItemsRequest::new();
 
@@ -565,7 +565,20 @@ impl WalletStorageType for SwsStorageType {
     fn open_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>) -> Result<Box<SwsStorage>, WalletStorageError>{
         // No call made to CCIS SWS,
         // TODO: can consider checking if wallet exists, or to whatever makes the program work
-        Ok(Box::new(SwsStorage::new(id)))
+        let mut req: WalletExistsRequest = WalletExistsRequest::new();
+        req.set_walletId(id.to_string());
+
+        match SWS_CLIENT.wallet_exists(&req) {
+            Err(e) => {
+                return Err(grpc_error_to_wallet_storage_error(e))
+            },
+            Ok(response) => {
+                match response.exists {
+                    false => Err(WalletStorageError::NotFound),
+                    true => Ok(Box::new(SwsStorage::new(id)))
+                }
+            }
+        }
     }
 
     fn delete_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>) -> Result<(), WalletStorageError> {
@@ -674,5 +687,4 @@ impl StorageIterator for SwsStorageIterator {
 }
 
 #[cfg(test)]
-mod ccis_sws_tests {
-}
+mod tests {}

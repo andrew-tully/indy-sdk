@@ -43,7 +43,7 @@ use utils::ctypes;
 use wql::storage::{WalletStorage, StorageRecord, StorageIterator, Tag, TagName, EncryptedValue};
 use wql::language;
 use errors::wallet::WalletStorageError;
-use sws_storage::{WalletStorageType, SwsStorageType};
+use sws_storage::WalletStorageType;
 
 use self::libc::c_char;
 
@@ -1046,4 +1046,924 @@ fn _tag_names_from_json(json: &str) -> Result<Vec<TagName>, WalletStorageError> 
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use std::{env, thread};
+    use std::ffi::{CString, CStr};
+    use std::sync::Arc;
+    use std::{slice, ptr};
+    use wql::storage::ENCRYPTED_KEY_LEN;
+    use rand::{thread_rng, Rng};
+    use grpcio::{ChannelBuilder, EnvBuilder, Environment, Channel};
+    use grpcio::Error::*;
+    use grpc::secret_part_service_grpc::SecretPartClient;
+    use grpc::secret_part_service::*;
+
+    lazy_static! {
+    static ref SECRET_PART_CLIENT: SecretPartClient = {
+        // TODO: Get credentials from Consul or parameters
+        let env: Arc<Environment> = Arc::new(EnvBuilder::new().build());
+        let ch: Channel = ChannelBuilder::new(env).connect("localhost:50051");
+        SecretPartClient::new(ch)
+    };
+}
+
+    #[test]
+    fn sws_wallet_crud_works() {
+        _cleanup();
+
+        let id = _wallet_id();
+        let config = _wallet_config();
+        let credentials = _wallet_credentials();
+        let metadata = _metadata_cstring();
+
+        // open wallet - should return error
+        let mut handle: i32 = -1;
+        let err = SwsWallet::open(id.as_ptr(),
+                                  config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                  credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                  &mut handle);
+        assert_eq!(err, ErrorCode::WalletNotFoundError);
+
+        // create wallet
+        let err = SwsWallet::create(id.as_ptr(),
+                                         config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                         credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                         metadata.as_ptr());
+        assert_eq!(err, ErrorCode::Success);
+
+        // open wallet
+        let err = SwsWallet::open(id.as_ptr(),
+                                       config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                       credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                       &mut handle);
+        assert_eq!(err, ErrorCode::Success);
+
+        // ensure we can fetch metadata
+        let mut metadata_handle: i32 = -1;
+        let mut metadata_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_storage_metadata(handle,
+                                                       &mut metadata_ptr,
+                                                       &mut metadata_handle);
+        assert_eq!(err, ErrorCode::Success);
+        let _metadata = unsafe { CStr::from_ptr(metadata_ptr).to_bytes() };
+        let _metadata = unsafe { &*(_metadata as *const [u8] as *const [i8]) };
+        //assert_eq!(_metadata.to_vec(), metadata);
+
+        let err = SwsWallet::free_storage_metadata(handle, metadata_handle);
+        assert_eq!(err, ErrorCode::Success);
+
+        // update metadata to some new metadata
+        let metadata2 = _metadata2_cstring();
+        let err = SwsWallet::set_storage_metadata(handle, metadata2.as_ptr());
+        assert_eq!(err, ErrorCode::Success);
+
+        let mut metadata_handle2: i32 = -1;
+        let mut metadata_ptr2: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_storage_metadata(handle,
+                                                       &mut metadata_ptr2,
+                                                       &mut metadata_handle2);
+        assert_eq!(err, ErrorCode::Success);
+        let _metadata2 = unsafe { CStr::from_ptr(metadata_ptr2).to_bytes() };
+        let _metadata2 = unsafe { &*(_metadata2 as *const [u8] as *const [i8]) };
+        //assert_eq!(_metadata2.to_vec(), metadata2);
+
+        let err = SwsWallet::free_storage_metadata(handle, metadata_handle2);
+        assert_eq!(err, ErrorCode::Success);
+
+        // close wallet
+        let err = SwsWallet::close(handle);
+        assert_eq!(err, ErrorCode::Success);
+
+        // delete wallet
+        let err = SwsWallet::delete(id.as_ptr(),
+                                         config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                         credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()));
+        assert_eq!(err, ErrorCode::Success);
+
+        // open wallet - should return error
+        let err = SwsWallet::open(id.as_ptr(),
+                                       config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                       credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                       &mut handle);
+        assert_eq!(err, ErrorCode::WalletNotFoundError);
+    }
+
+    #[test]
+    fn sws_wallet_add_record_works() {
+        _cleanup();
+
+        let handle = _create_and_open_wallet();
+
+        let type_  = _type1();
+        let id     = _id1();
+        let value_ = _value1();
+        let tags_  = _tags();
+
+        let joined_value = value_.to_bytes();
+        let tags  = _tags_json(&tags_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type_.as_ptr(),
+                                             id.as_ptr(),
+                                             joined_value.as_ptr(),
+                                             joined_value.len(),
+                                             tags.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+        _close_and_delete_wallet(handle);
+    }
+
+    #[test]
+    fn sws_wallet_get_record_works() {
+        _cleanup();
+
+        let handle = _create_and_open_wallet();
+
+        let type1_  = _type1();
+        let id1     = _id1();
+        let value1_ = _value1();
+        let tags1_  = _tags();
+
+        let id1_    = _id_bytes1();
+        let joined_value1 = value1_.to_bytes();
+        let tags1  = _tags_json(&tags1_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             joined_value1.as_ptr(),
+                                             joined_value1.len(),
+                                             tags1.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        let type2_  = _type2();
+        let id2     = _id2();
+        let value2_ = _value2();
+        let tags2_  = _tags();
+
+        let joined_value2 = value2_.to_bytes();
+        let tags2  = _tags_json(&tags2_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type2_.as_ptr(),
+                                             id2.as_ptr(),
+                                             joined_value2.as_ptr(),
+                                             joined_value2.len(),
+                                             tags2.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the 2 records and verify
+        let mut rec_handle: i32 = -1;
+        let get_options = _fetch_options(true, true, true);
+        let err = SwsWallet::get_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             get_options.as_ptr(),
+                                             &mut rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        let mut id_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_id(handle,
+                                                rec_handle,
+                                                &mut id_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let _id = unsafe { CStr::from_ptr(id_ptr).to_bytes() };
+        assert_eq!(_id.to_vec(), id1_);
+
+        let mut type_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_type(handle,
+                                                  rec_handle,
+                                                  &mut type_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let _type_ = unsafe { CStr::from_ptr(type_ptr).to_str().unwrap() };
+        assert_eq!(_type_, type1_.to_str().unwrap());
+
+        let mut value_bytes: *const u8 = ptr::null();
+        let mut value_bytes_len: usize = 0;
+        let err = SwsWallet::get_record_value(handle,
+                                                   rec_handle,
+                                                   &mut value_bytes,
+                                                   &mut value_bytes_len);
+        assert_match!(ErrorCode::Success, err);
+        let value = unsafe { slice::from_raw_parts(value_bytes, value_bytes_len) };
+        let _value = EncryptedValue::from_bytes(value).unwrap();
+        assert_eq!(_value, value1_);
+
+        let mut tags_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_tags(handle,
+                                                  rec_handle,
+                                                  &mut tags_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let tags_json = unsafe { CStr::from_ptr(tags_ptr).to_str().unwrap() };
+        let _tags = _tags_from_json(tags_json).unwrap();
+        let _tags = _sort_tags(_tags);
+        let tags1_ = _sort_tags(tags1_);
+        assert_eq!(_tags, tags1_);
+
+        let err = SwsWallet::free_record(handle, rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        _close_and_delete_wallet(handle);
+    }
+
+    #[test]
+    fn sws_wallet_update_record_works() {
+        _cleanup();
+
+        let handle = _create_and_open_wallet();
+
+        let type1_  = _type1();
+        let id1     = _id1();
+        let value1_ = _value1();
+        let tags1_  = _tags();
+
+        let id1_    = _id_bytes1();
+        let joined_value1 = value1_.to_bytes();
+        let tags1  = _tags_json(&tags1_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             joined_value1.as_ptr(),
+                                             joined_value1.len(),
+                                             tags1.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        let value2_ = _value2();
+        let tags2_  = _tags();
+
+        let joined_value2 = value2_.to_bytes();
+        let tags2  = _tags_json(&tags2_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::update_record_value(handle,
+                                                      type1_.as_ptr(),
+                                                      id1.as_ptr(),
+                                                      joined_value2.as_ptr(),
+                                                      joined_value2.len());
+        assert_match!(ErrorCode::Success, err);
+
+        let err = SwsWallet::update_record_tags(handle,
+                                                     type1_.as_ptr(),
+                                                     id1.as_ptr(),
+                                                     tags2.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the record and verify updates
+        let mut rec_handle: i32 = -1;
+        let get_options = _fetch_options(true, true, true);
+        let err = SwsWallet::get_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             get_options.as_ptr(),
+                                             &mut rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        let mut id_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_id(handle,
+                                                rec_handle,
+                                                &mut id_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let _id = unsafe { CStr::from_ptr(id_ptr).to_bytes() };
+        assert_eq!(_id.to_vec(), id1_);
+
+        let mut type_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_type(handle,
+                                                  rec_handle,
+                                                  &mut type_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let _type_ = unsafe { CStr::from_ptr(type_ptr).to_str().unwrap() };
+        assert_eq!(_type_, type1_.to_str().unwrap());
+
+        let mut value_bytes: *const u8 = ptr::null();
+        let mut value_bytes_len: usize = 0;
+        let err = SwsWallet::get_record_value(handle,
+                                                   rec_handle,
+                                                   &mut value_bytes,
+                                                   &mut value_bytes_len);
+        assert_match!(ErrorCode::Success, err);
+        let value = unsafe { slice::from_raw_parts(value_bytes, value_bytes_len) };
+        let _value = EncryptedValue::from_bytes(value).unwrap();
+        assert_eq!(_value, value2_);
+
+        let mut tags_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_tags(handle,
+                                                  rec_handle,
+                                                  &mut tags_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let tags_json = unsafe { CStr::from_ptr(tags_ptr).to_str().unwrap() };
+        let _tags = _tags_from_json(tags_json).unwrap();
+        let _tags = _sort_tags(_tags);
+        let tags2_ = _sort_tags(tags2_);
+        assert_eq!(_tags, tags2_);
+
+        let err = SwsWallet::free_record(handle, rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        _close_and_delete_wallet(handle);
+    }
+
+    #[test]
+    fn sws_wallet_delete_record_works() {
+        _cleanup();
+
+        let handle = _create_and_open_wallet();
+
+        let type1_  = _type1();
+        let id1     = _id1();
+        let value1_ = _value1();
+        let tags1_  = _tags();
+
+        let joined_value1 = value1_.to_bytes();
+        let tags1  = _tags_json(&tags1_);
+
+        // add record to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             joined_value1.as_ptr(),
+                                             joined_value1.len(),
+                                             tags1.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the record
+        let mut rec_handle: i32 = -1;
+        let get_options = _fetch_options(true, true, true);
+        let err = SwsWallet::get_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             get_options.as_ptr(),
+                                             &mut rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        let err = SwsWallet::free_record(handle, rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        // delete record
+        let err = SwsWallet::delete_record(handle,
+                                                type1_.as_ptr(),
+                                                id1.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the record and verify it is not found
+        let mut rec_handle: i32 = -1;
+        let get_options = _fetch_options(true, true, true);
+        let err = SwsWallet::get_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             get_options.as_ptr(),
+                                             &mut rec_handle);
+        assert_match!(ErrorCode::WalletItemNotFound, err);
+
+        _close_and_delete_wallet(handle);
+    }
+
+    #[test]
+    fn sws_wallet_delete_tags_works() {
+        _cleanup();
+
+        let handle = _create_and_open_wallet();
+
+        let type1_  = _type1();
+        let id1     = _id1();
+        let value1_ = _value1();
+        let tags1_  = _tags();
+
+        let joined_value1 = value1_.to_bytes();
+        let tags1  = _tags_json(&tags1_);
+
+        // add record to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             joined_value1.as_ptr(),
+                                             joined_value1.len(),
+                                             tags1.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the record
+        let mut rec_handle: i32 = -1;
+        let get_options = _fetch_options(true, true, true);
+        let err = SwsWallet::get_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             get_options.as_ptr(),
+                                             &mut rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        let err = SwsWallet::free_record(handle, rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        // delete tags
+        let tag_names = _tag_names_to_delete();
+        let tag_names = _tag_names_json(&tag_names);
+        let err = SwsWallet::delete_record_tags(handle,
+                                                     type1_.as_ptr(),
+                                                     id1.as_ptr(),
+                                                     tag_names.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the record
+        let mut rec_handle: i32 = -1;
+        let get_options = _fetch_options(true, true, true);
+        let err = SwsWallet::get_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             get_options.as_ptr(),
+                                             &mut rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        let mut tags_ptr: *const c_char = ptr::null_mut();
+        let err = SwsWallet::get_record_tags(handle,
+                                                  rec_handle,
+                                                  &mut tags_ptr);
+        assert_match!(ErrorCode::Success, err);
+        let tags_json = unsafe { CStr::from_ptr(tags_ptr).to_str().unwrap() };
+        let _tags = _tags_from_json(tags_json).unwrap();
+        let _tags = _sort_tags(_tags);
+        let tags2_  = _tags_removed();
+        let tags2_ = _sort_tags(tags2_);
+        assert_eq!(_tags, tags2_);
+
+        let err = SwsWallet::free_record(handle, rec_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        _close_and_delete_wallet(handle);
+    }
+
+    #[test]
+    fn sws_wallet_get_all_works() {
+        _cleanup();
+
+        let handle = _create_and_open_wallet();
+
+        let type1_  = _type1();
+        let id1     = _id1();
+        let value1_ = _value1();
+        let tags1_  = _tags();
+
+        let joined_value1 = value1_.to_bytes();
+        let tags1  = _tags_json(&tags1_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type1_.as_ptr(),
+                                             id1.as_ptr(),
+                                             joined_value1.as_ptr(),
+                                             joined_value1.len(),
+                                             tags1.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        let type2_  = _type2();
+        let id2     = _id2();
+        let value2_ = _value2();
+        let tags2_  = _tags();
+
+        let joined_value2 = value2_.to_bytes();
+        let tags2  = _tags_json(&tags2_);
+
+        // unit test for adding record(s) to the wallet
+        let err = SwsWallet::add_record(handle,
+                                             type2_.as_ptr(),
+                                             id2.as_ptr(),
+                                             joined_value2.as_ptr(),
+                                             joined_value2.len(),
+                                             tags2.as_ptr());
+        assert_match!(ErrorCode::Success, err);
+
+        // fetch the 2 records and verify
+        let mut search_handle: i32 = -1;
+        let err = SwsWallet::search_all_records(handle, &mut search_handle);
+        assert_match!(ErrorCode::Success, err);
+
+        let mut rec_count: i32 = 0;
+        let mut search_continue: bool = true;
+        while search_continue {
+            let mut rec_handle = -1;
+            let err = SwsWallet::fetch_search_next_record(handle, search_handle, &mut rec_handle);
+            if err == ErrorCode::WalletItemNotFound {
+                search_continue = false;
+            } else if err != ErrorCode::Success {
+                search_continue = false;
+            }
+
+            if search_continue {
+                rec_count = rec_count + 1;
+
+                // fetch the record just to verify we can ...
+                let mut value_bytes: *const u8 = ptr::null();
+                let mut value_bytes_len: usize = 0;
+                let err = SwsWallet::get_record_value(handle,
+                                                           rec_handle,
+                                                           &mut value_bytes,
+                                                           &mut value_bytes_len);
+                assert_match!(ErrorCode::Success, err);
+                let value = unsafe { slice::from_raw_parts(value_bytes, value_bytes_len) };
+                let _value = EncryptedValue::from_bytes(value).unwrap();
+
+                let mut tags_ptr: *const c_char = ptr::null_mut();
+                let err = SwsWallet::get_record_tags(handle,
+                                                          rec_handle,
+                                                          &mut tags_ptr);
+                assert_match!(ErrorCode::Success, err);
+                let tags_json = unsafe { CStr::from_ptr(tags_ptr).to_str().unwrap() };
+                let _tags = _tags_from_json(tags_json).unwrap();
+                let _tags = _sort_tags(_tags);
+
+                // free record once done
+                let err = SwsWallet::free_record(handle, rec_handle);
+                assert_match!(ErrorCode::Success, err);
+            }
+        }
+        // confirm 2 records total
+        assert_eq!(2, rec_count);
+
+        _close_and_delete_wallet(handle);
+    }
+    /* TODO unit test for wallet search
+        #[test]
+        fn sws_wallet_search_records_works() {
+            _cleanup();
+
+            let handle = _create_and_open_wallet();
+
+            let type1_  = _type1();
+            let id1     = _id1();
+            let value1_ = _value1();
+            let tags1_  = _tags();
+
+            let joined_value1 = value1_.to_bytes();
+            let tags1  = _tags_json(&tags1_);
+
+            // unit test for adding record(s) to the wallet
+            let err = SwsWallet::add_record(handle,
+                                    type1_.as_ptr(),
+                                    id1.as_ptr(),
+                                    joined_value1.as_ptr(),
+                                    joined_value1.len(),
+                                    tags1.as_ptr());
+            assert_match!(ErrorCode::Success, err);
+
+            let id2     = _id2();
+            let value2_ = _value2();
+
+            let joined_value2 = value2_.to_bytes();
+
+            // unit test for adding record(s) to the wallet
+            let err = SwsWallet::add_record(handle,
+                                    type1_.as_ptr(),
+                                    id2.as_ptr(),
+                                    joined_value2.as_ptr(),
+                                    joined_value2.len(),
+                                    tags1.as_ptr());
+            assert_match!(ErrorCode::Success, err);
+
+            // search the records and verify
+            println!("Setting up search query");
+            let mut search_handle: i32 = -1;
+            //let tag_name = String::from_utf8(vec![1, 5, 8]).unwrap();
+            //let tag_value = String::from_utf8(vec![3, 5, 6]).unwrap();
+            let tag_name = format!("{:?}", vec![1, 5, 8]);
+            let tag_value = format!("{:?}", vec![3, 5, 6]);
+            let query_json = format!(r#"{{{}:{}}}"#, tag_name, tag_value);
+            let query_json = CString::new(query_json.to_string()).unwrap();
+            println!("query_json {:?}", query_json);
+            let options_json = _search_options(true, true, true, true, true);
+            println!("Options {:?}", options_json);
+            let err = SwsWallet::search_records(handle,
+                                    type1_.as_ptr(),
+                                    query_json.as_ptr(),
+                                    options_json.as_ptr() as *const i8,
+                                    &mut search_handle);
+            assert_match!(ErrorCode::Success, err);
+
+            let mut rec_count: i32 = 0;
+            let mut search_continue: bool = true;
+            while search_continue {
+                let mut rec_handle = -1;
+                let err = SwsWallet::fetch_search_next_record(handle, search_handle, &mut rec_handle);
+                if err == ErrorCode::WalletItemNotFound {
+                    search_continue = false;
+                } else if err != ErrorCode::Success {
+                    search_continue = false;
+                }
+
+                if search_continue {
+                    rec_count = rec_count + 1;
+
+                    // fetch the record just to verify we can ...
+                    let mut value_bytes: *const u8 = ptr::null();
+                    let mut value_bytes_len: usize = 0;
+                    let err = SwsWallet::get_record_value(handle,
+                                            rec_handle,
+                                            &mut value_bytes,
+                                            &mut value_bytes_len);
+                    assert_match!(ErrorCode::Success, err);
+                    let value = unsafe { slice::from_raw_parts(value_bytes, value_bytes_len) };
+                    let _value = EncryptedValue::from_bytes(value).unwrap();
+
+                    let mut tags_ptr: *const c_char = ptr::null_mut();
+                    let err = SwsWallet::get_record_tags(handle,
+                                            rec_handle,
+                                            &mut tags_ptr);
+                    assert_match!(ErrorCode::Success, err);
+                    let tags_json = unsafe { CStr::from_ptr(tags_ptr).to_str().unwrap() };
+                    let _tags = _tags_from_json(tags_json).unwrap();
+                    let _tags = _sort_tags(_tags);
+
+                    // free record once done
+                    let err = SwsWallet::free_record(handle, rec_handle);
+                    assert_match!(ErrorCode::Success, err);
+                }
+            }
+            // confirm 2 records total
+            assert_eq!(2, rec_count);
+
+            _close_and_delete_wallet(handle);
+        }
+    */
+    fn _set_wallet_encryption(wallet_id: &str) {
+        let mut req: SetWalletEncryptionRequest = SetWalletEncryptionRequest::new();
+        let str_buf: String = wallet_id.to_owned();
+        req.set_walletId(str_buf);
+        req.set_isEncrypted(false);
+
+        SECRET_PART_CLIENT.set_wallet_encryption(&req);
+    }
+
+    fn _create_and_open_wallet() -> i32 {
+        let id = _wallet_id();
+        let config = _wallet_config();
+        let credentials = _wallet_credentials();
+        let metadata = _metadata_cstring();
+
+        // create wallet
+        let err = SwsWallet::create(id.as_ptr(),
+                                         config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                         credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                         metadata.as_ptr());
+        assert_eq!(err, ErrorCode::Success);
+
+        // set wallet encryption
+        _set_wallet_encryption(id.to_str().unwrap());
+
+        // open wallet
+        let mut handle: i32 = -1;
+        let err = SwsWallet::open(id.as_ptr(),
+                                       config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                       credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                       &mut handle);
+        assert_eq!(err, ErrorCode::Success);
+
+        handle
+    }
+
+    fn _close_and_delete_wallet(handle: i32) {
+        let id = _wallet_id();
+        let config = _wallet_config();
+        let credentials = _wallet_credentials();
+
+        // close wallet
+        let err = SwsWallet::close(handle);
+        assert_eq!(err, ErrorCode::Success);
+
+        // delete wallet
+        let err = SwsWallet::delete(id.as_ptr(),
+                                         config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+                                         credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()));
+        assert_eq!(err, ErrorCode::Success);
+    }
+
+    fn _cleanup() {
+        let ten_millis = std::time::Duration::from_millis(1);
+        let _now = time::now();
+        thread::sleep(ten_millis);
+
+        let id = _wallet_id();
+        let config = _wallet_config();
+        let credentials = _wallet_credentials();
+
+        let _err = SwsWallet::delete(
+            id.as_ptr(),
+            config.as_ref().map_or(ptr::null(), |x| x.as_ptr()),
+            credentials.as_ref().map_or(ptr::null(), |x| x.as_ptr()));
+    }
+
+    fn _random_string(len: usize) -> String {
+        thread_rng().gen_ascii_chars().take(len).collect()
+    }
+
+    fn _wallet_id() -> CString {
+        CString::new("walle1").unwrap()
+    }
+
+
+    fn _wallet_config() -> Option<CString> {
+        let wallet_scheme = env::var("WALLET_SCHEME");
+        match wallet_scheme {
+            Ok(scheme) => {
+                if scheme == "MultiWalletSingleTable" {
+                    return _wallet_config_multi();
+                }
+                if scheme == "MultiWalletSingleTableSharedPool" {
+                    return _wallet_config_multi_with_shared_pool();
+                }
+            },
+            Err(_) => ()
+        };
+        let config = Some(json!({
+            "url": "localhost:5432".to_owned()
+        }).to_string());
+        config.map(CString::new)
+            .map_or(Ok(None), |r| r.map(Some)).unwrap()
+    }
+
+    fn _wallet_config_multi() -> Option<CString> {
+        let config = Some(json!({
+            "url": "localhost:5432".to_owned(),
+            "wallet_scheme": "MultiWalletSingleTable".to_owned(),
+            "database_name": "multi_wallet_db".to_owned()
+        }).to_string());
+        config.map(CString::new)
+            .map_or(Ok(None), |r| r.map(Some)).unwrap()
+    }
+
+    fn _wallet_config_multi_with_shared_pool() -> Option<CString> {
+        let config = Some(json!({
+            "url": "localhost:5432".to_owned(),
+            "wallet_scheme": "MultiWalletSingleTableSharedPool".to_owned()
+        }).to_string());
+        config.map(CString::new)
+            .map_or(Ok(None), |r| r.map(Some)).unwrap()
+    }
+
+    fn _wallet_credentials() -> Option<CString> {
+        let creds = Some(json!({
+            "account": "postgres".to_owned(),
+            "password": "mysecretpassword".to_owned(),
+            "admin_account": Some("postgres".to_owned()),
+            "admin_password": Some("mysecretpassword".to_owned())
+        }).to_string());
+        creds.map(CString::new)
+            .map_or(Ok(None), |r| r.map(Some)).unwrap()
+    }
+
+    fn _metadata() -> Vec<u8> {
+        return vec![
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8,
+            1, 2, 3, 4, 5, 6, 7, 8
+        ];
+    }
+
+    fn _metadata_cstring() -> CString {
+        let foo = _metadata();
+        CString::new(foo).unwrap()
+    }
+
+    fn _metadata2() -> Vec<u8> {
+        return vec![
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9,
+            2, 3, 4, 5, 6, 7, 8, 9
+        ];
+    }
+
+    fn _metadata2_cstring() -> CString {
+        let foo = _metadata2();
+        CString::new(foo).unwrap()
+    }
+
+    fn _type(i: u8) -> CString {
+        let type_ = vec![i, 1 + i, 2 + i];
+        CString::new(type_.clone()).unwrap()
+    }
+
+    fn _type1() -> CString {
+        _type(1)
+    }
+
+    fn _type2() -> CString {
+        _type(2)
+    }
+
+    fn _id_bytes(i: u8) -> Vec<u8> {
+        vec![3 + i, 4 + i, 5 + i]
+    }
+
+    fn _id_bytes1() -> Vec<u8> {
+        _id_bytes(1)
+    }
+
+    fn _id_bytes2() -> Vec<u8> {
+        _id_bytes(2)
+    }
+
+    fn _id(i: u8) -> CString {
+        let id_ = _id_bytes(i);
+        CString::new(id_.clone()).unwrap()
+    }
+
+    fn _id1() -> CString {
+        _id(1)
+    }
+
+    fn _id2() -> CString {
+        _id(2)
+    }
+
+    fn _value(i: u8) -> EncryptedValue {
+        EncryptedValue { data: vec![6 + i, 7 + i, 8 + i], key: _key(i) }
+    }
+
+    fn _value1() -> EncryptedValue {
+        _value(1)
+    }
+
+    fn _value2() -> EncryptedValue {
+        _value(2)
+    }
+
+    fn _key(i: u8) -> Vec<u8> {
+        vec![i; ENCRYPTED_KEY_LEN]
+    }
+
+    fn _tags() -> Vec<Tag> {
+        let mut tags: Vec<Tag> = Vec::new();
+        tags.push(Tag::Encrypted(vec![1, 5, 8], vec![3, 5, 6]));
+        tags.push(Tag::PlainText(vec![1, 5, 8, 1], "Plain value 1".to_string()));
+        tags.push(Tag::Encrypted(vec![2, 5, 8], vec![3, 5, 7]));
+        tags.push(Tag::PlainText(vec![2, 5, 8, 1], "Plain value 2".to_string()));
+        tags
+    }
+
+    fn _tags_removed() -> Vec<Tag> {
+        let mut tags: Vec<Tag> = Vec::new();
+        tags.push(Tag::Encrypted(vec![2, 5, 8], vec![3, 5, 7]));
+        tags.push(Tag::PlainText(vec![2, 5, 8, 1], "Plain value 2".to_string()));
+        tags
+    }
+
+    fn _tag_names_to_delete() -> Vec<TagName> {
+        vec![
+            TagName::OfEncrypted(vec![1, 5, 8]),
+            TagName::OfPlain(vec![1, 5, 8, 1])
+        ]
+    }
+
+    fn _tag_names_json(tag_names_: &Vec<TagName>) -> CString {
+        CString::new(_tag_names_to_json(tag_names_).unwrap()).unwrap()
+    }
+
+    fn _tags_json(tags_: &Vec<Tag>) -> CString {
+        CString::new(_tags_to_json(tags_).unwrap()).unwrap()
+    }
+
+    fn _new_tags() -> Vec<Tag> {
+        vec![
+            Tag::Encrypted(vec![1, 1, 1], vec![2, 2, 2]),
+            Tag::PlainText(vec![1, 1, 1], String::from("tag_value_3"))
+        ]
+    }
+
+    fn _sort_tags(mut v: Vec<Tag>) -> Vec<Tag> {
+        v.sort();
+        v
+    }
+
+    fn _fetch_options(type_: bool, value: bool, tags: bool) -> CString {
+        let get_options_string = json!({
+            "retrieveType": type_,
+            "retrieveValue": value,
+            "retrieveTags": tags,
+        }).to_string();
+        CString::new(get_options_string).unwrap()
+    }
+
+    fn _search_options(retrieve_records: bool, retrieve_total_count: bool, retrieve_value: bool, retrieve_tags: bool, retrieve_type: bool) -> String {
+        let mut map = HashMap::new();
+
+        map.insert("retrieveRecords", retrieve_records);
+        map.insert("retrieveTotalCount", retrieve_total_count);
+        map.insert("retrieveValue", retrieve_value);
+        map.insert("retrieveTags", retrieve_tags);
+        map.insert("retrieveType", retrieve_type);
+
+        serde_json::to_string(&map).unwrap()
+    }
+
+}
