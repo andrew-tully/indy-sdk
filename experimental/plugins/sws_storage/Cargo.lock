@@ -913,6 +913,8 @@ dependencies = [
  "log-panics",
  "named_type",
  "named_type_derive",
+ "num-derive",
+ "num-traits",
  "openssl",
  "owning_ref",
  "percent-encoding",

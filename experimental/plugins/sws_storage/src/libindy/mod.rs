@@ -1,9 +1,11 @@
 pub mod wallet;
 pub mod logger;
+use std::{fmt, io};
+use num_derive::FromPrimitive;
 //use errors::common::CommonError;
 //use errors::ToErrorCode;
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Copy, Clone, FromPrimitive)]
 #[repr(i32)]
 pub enum ErrorCode
 {
@@ -218,4 +220,10 @@ pub enum ErrorCode
 
     // Extra funds on inputs
     PaymentExtraFundsError = 705
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }

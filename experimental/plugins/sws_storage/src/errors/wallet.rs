@@ -5,6 +5,7 @@ use std::fmt;
 use std::string::FromUtf8Error;
 use std::ffi::NulError;
 use std::str::Utf8Error;
+use num_traits::FromPrimitive;
 
 use serde_json;
 
@@ -209,6 +210,67 @@ impl From<CommonError> for WalletStorageError {
 impl From<WalletQueryError> for WalletStorageError {
     fn from(err: WalletQueryError) -> Self {
         WalletStorageError::QueryError(err)
+    }
+}
+
+impl From<ErrorCode> for WalletStorageError {
+    fn from(err: ErrorCode) -> Self {
+        match err {
+            ErrorCode::WalletAlreadyExistsError => WalletStorageError::AlreadyExists,
+            ErrorCode::WalletNotFoundError => WalletStorageError::NotFound,
+            ErrorCode::CommonInvalidStructure => WalletStorageError::ConfigError,
+            ErrorCode::WalletItemNotFound => WalletStorageError::ItemNotFound,
+            ErrorCode::WalletItemAlreadyExists => WalletStorageError::ItemAlreadyExists,
+            _ => WalletStorageError::GenericError(err.to_string())
+        }
+    }
+}
+
+impl From<grpcio::Error> for WalletStorageError {
+    fn from(e: grpcio::Error) -> Self {
+        match e {
+            grpcio::Error::RpcFailure(failure) => {
+                let details = failure.details.unwrap_or("".to_string());
+                let mut err = WalletStorageError::IOError(details.clone());
+                match failure.status {
+                    grpcio::RpcStatusCode::Internal => {
+                        match serde_json::from_str::<serde_json::Value>(&details) {
+                            Ok(json) => {
+                                let message = match json.get("message") {
+                                    Some(m) => {
+                                        match m.as_str() {
+                                            Some(s) => s.to_string(),
+                                            None => details.clone()
+                                        }
+                                    },
+                                    None => details.clone()
+                                };
+                                err = match json.get("code") {
+                                    Some(c) => {
+                                        match c.as_u64() {
+                                            Some(u) => {
+                                                match ErrorCode::from_u64(u) {
+                                                    Some(err_code) => {
+                                                        return WalletStorageError::from(err_code)
+                                                    },
+                                                    None => WalletStorageError::IOError(message)
+                                                }
+                                            },
+                                            None => WalletStorageError::IOError(message)
+                                        }
+                                    },
+                                    None => WalletStorageError::IOError(message)
+                                }
+                            },
+                            _ => {}
+                        }
+                    },
+                    _ => {}
+                }
+                err
+            },
+            _ => WalletStorageError::IOError(format!("Unexpected error: {:?}", e.description()))
+        }
     }
 }
 

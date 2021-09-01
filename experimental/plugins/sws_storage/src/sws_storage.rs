@@ -122,15 +122,6 @@ impl SwsStorage {
     }
 }
 
-fn grpc_error_to_wallet_storage_error(e: grpcio::Error) -> WalletStorageError {
-    return match e {
-        RpcFailure(failure) => {
-            WalletStorageError::IOError(failure.details.unwrap_or("".to_string()))
-        },
-        _ => WalletStorageError::IOError(format!("Unexpected error: {:?}", e.description()))
-    };
-}
-
 impl WalletStorage for SwsStorage {
     #[allow(non_snake_case)]
     fn get(&self, type_: &[u8], id: &[u8], options: &str) -> Result<StorageRecord, WalletStorageError> {
@@ -151,7 +142,7 @@ impl WalletStorage for SwsStorage {
         // [Done] match call of SWS client of get_wallet_item, error handling, response. 1. walletItem
         let wallet_item: WalletItemResponse = match SWS_CLIENT.get_wallet_item(&req) {
             Err(e) => {
-              return Err(grpc_error_to_wallet_storage_error(e))
+              return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.walletItem.unwrap() }
         };
@@ -247,7 +238,7 @@ impl WalletStorage for SwsStorage {
         // [Done] Match call of SWS client of add_wallet_item, error handling, response -> message: String
         match SWS_CLIENT.add_wallet_item(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -270,7 +261,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of update_wallet_item, error handling, response. 1. message: String
         match SWS_CLIENT.update_wallet_item(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -318,7 +309,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of add_wallet_item_tags, error handling, response 1. message: String
         match SWS_CLIENT.add_wallet_item_tags(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -366,7 +357,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of update_wallet_item_tags, error handling, response 1. message: String
         match SWS_CLIENT.update_wallet_item_tags(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -406,7 +397,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of delete_wallet_item_tags, error handling, response 1. message: String
         match SWS_CLIENT.delete_wallet_item_tags(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -426,7 +417,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of delete_wallet, error handling, response 1. message: String
         match SWS_CLIENT.delete_wallet_item(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -445,7 +436,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of get_wallet_metadata, error handling, response 1. metadata: vu8
         let metadata: Vec<u8> = match SWS_CLIENT.get_wallet_metadata(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.metadata }
         };
@@ -463,7 +454,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of set_wallet_metadata, error handling, response 1. message: String
         match SWS_CLIENT.set_wallet_metadata(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.message }
         };
@@ -487,7 +478,7 @@ impl WalletStorage for SwsStorage {
         // Match call of SWS client of get_all_wallet_items, error handling, response 1. walletItems: Repeated<WalletItemResponse>
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.get_all_wallet_items(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.walletItems.into_vec() }
         };
@@ -522,7 +513,7 @@ impl WalletStorage for SwsStorage {
 
         let wallet_items_list: Vec<WalletItemResponse> = match SWS_CLIENT.search_wallet_items(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e.walletItems.into_vec() }
         };
@@ -553,13 +544,9 @@ impl WalletStorageType for SwsStorageType {
 
         // Call the CreateWallet function with the request
         match SWS_CLIENT.create_wallet(&req) {
-            Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
-            },
-            Ok(e) => { e }
-        };
-
-        Ok(())
+            Err(e) => Err(WalletStorageError::from(e)),
+            Ok(_) => Ok(())
+        }
     }
 
     fn open_storage(&self, id: &str, _config: Option<&str>, _credentials: Option<&str>) -> Result<Box<SwsStorage>, WalletStorageError>{
@@ -569,9 +556,7 @@ impl WalletStorageType for SwsStorageType {
         req.set_walletId(id.to_string());
 
         match SWS_CLIENT.wallet_exists(&req) {
-            Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
-            },
+            Err(e) => Err(WalletStorageError::from(e)),
             Ok(response) => {
                 match response.exists {
                     false => Err(WalletStorageError::NotFound),
@@ -589,7 +574,7 @@ impl WalletStorageType for SwsStorageType {
         // Call the DeleteWallet function with the request
         match SWS_CLIENT.delete_wallet(&req) {
             Err(e) => {
-                return Err(grpc_error_to_wallet_storage_error(e))
+                return Err(WalletStorageError::from(e))
             },
             Ok(e) => { e }
         };

@@ -25,6 +25,8 @@ extern crate rand;
 extern crate grpcio;
 extern crate protobuf;
 extern crate futures;
+extern crate num_derive;
+extern crate num_traits;
 
 pub mod libindy;
 
